@@ -1,4 +1,5 @@
 ﻿using System.Collections.Generic;
+using Unity.Mathematics;
 using UnityEngine;
 using Random = UnityEngine.Random;
 
@@ -27,6 +28,9 @@ public class BibiteManager : MonoBehaviour
     private int _numWeights;
     private int _numBiases;
 
+    private int[] weightBaseOffsets;
+    private int[] biasBaseOffsets;
+
     private ComputeBuffer inputsBuffer;
     private ComputeBuffer weightsBuffer;
     private ComputeBuffer biasesBuffer;
@@ -34,6 +38,8 @@ public class BibiteManager : MonoBehaviour
     private ComputeBuffer weightBaseOffsetsBuffer;
     private ComputeBuffer biasBaseOffsetsBuffer;
     private ComputeBuffer outputsBuffer;
+
+    private int kernel;
 
     [Header("Bibite Count")]
     [SerializeField] int numBibites = 20;
@@ -92,16 +98,41 @@ public class BibiteManager : MonoBehaviour
             });
         }
 
+        kernel = _computeShader.FindKernel("Forward");
+
         _numWeights = _bibiteDatas[0].weights.Length;
         _numBiases = _bibiteDatas[0].biases.Length;
 
-        inputsBuffer = new(_numInputs * 3500, sizeof(float));
-        weightsBuffer = new(_numWeights * 3500, sizeof(float));
-        biasesBuffer = new(_numBiases * 3500, sizeof(float));
+        inputsBuffer = new(_numInputs * 1500, sizeof(float));
+        weightsBuffer = new(_numWeights * 1500, sizeof(float));
+        biasesBuffer = new(_numBiases * 1500, sizeof(float));
         layerSizesBuffer = new(_neuralNet.layerSizes.Length, sizeof(int));
         weightBaseOffsetsBuffer = new(_neuralNet.layerSizes.Length - 1, sizeof(int));
         biasBaseOffsetsBuffer = new(_neuralNet.layerSizes.Length - 1, sizeof(int));
-        outputsBuffer = new(3500, sizeof(int));
+        outputsBuffer = new(1500, sizeof(int));
+
+        layerSizesBuffer.SetData(_neuralNet.layerSizes);
+        weightsBuffer.SetData(_allWeights.ToArray());
+        biasesBuffer.SetData(_allBiases.ToArray());
+
+        _computeShader.SetInt("totalLayers", _neuralNet.layerSizes.Length);
+        _computeShader.SetInt("numInputs", _numInputs);
+
+        _computeShader.SetBuffer(kernel, "layerSizes", layerSizesBuffer);
+        _computeShader.SetBuffer(kernel, "outputs", outputsBuffer);
+        _computeShader.SetBuffer(kernel, "weights", weightsBuffer);
+        _computeShader.SetBuffer(kernel, "biases", biasesBuffer);
+
+        weightBaseOffsets = new int[_neuralNet.layerSizes.Length - 1];
+        biasBaseOffsets = new int[_neuralNet.layerSizes.Length - 1];
+
+        for (int l = 1; l < _neuralNet.layerSizes.Length; l++)
+        {
+            int prevLayerSize = _neuralNet.layerSizes[l - 1];
+            int nextLayerSize = _neuralNet.layerSizes[l];
+            weightBaseOffsets[l - 1] = (l - 1) * numBibites * prevLayerSize * nextLayerSize;
+            biasBaseOffsets[l - 1] = (l - 1) * numBibites * nextLayerSize;
+        }
     }
 
     private void OnDisable()
@@ -118,45 +149,21 @@ public class BibiteManager : MonoBehaviour
     private void Update()
     {
         float dt = Time.deltaTime;
-        _toRemove.Clear();
         _allInputs.Clear();
 
-        int[] weightBaseOffsets = new int[_neuralNet.layerSizes.Length - 1];
-        int[] biasBaseOffsets = new int[_neuralNet.layerSizes.Length - 1];
-
-        for (int l = 1; l < _neuralNet.layerSizes.Length; l++)
-        {
-            int prevLayerSize = _neuralNet.layerSizes[l - 1];
-            int nextLayerSize = _neuralNet.layerSizes[l];
-            weightBaseOffsets[l - 1] = (l - 1) * numBibites * prevLayerSize * nextLayerSize;
-            biasBaseOffsets[l - 1] = (l - 1) * numBibites * nextLayerSize;
-        }
-
         inputsBuffer.SetData(_allInputs.ToArray());
-        weightsBuffer.SetData(_allWeights.ToArray());
-        biasesBuffer.SetData(_allBiases.ToArray());
-        layerSizesBuffer.SetData(_neuralNet.layerSizes);
         weightBaseOffsetsBuffer.SetData(weightBaseOffsets);
         biasBaseOffsetsBuffer.SetData(biasBaseOffsets);
 
-        int kernelIndex = _computeShader.FindKernel("Forward");
+        _computeShader.SetBuffer(kernel, "inputs", inputsBuffer);
+        _computeShader.SetBuffer(kernel, "weightBaseOffsets", weightBaseOffsetsBuffer);
+        _computeShader.SetBuffer(kernel, "biasBaseOffsets", biasBaseOffsetsBuffer);
 
-        _computeShader.SetBuffer(kernelIndex, "inputs", inputsBuffer);
-        _computeShader.SetBuffer(kernelIndex, "weights", weightsBuffer);
-        _computeShader.SetBuffer(kernelIndex, "biases", biasesBuffer);
-        _computeShader.SetBuffer(kernelIndex, "layerSizes", layerSizesBuffer);
-        _computeShader.SetBuffer(kernelIndex, "weightBaseOffsets", weightBaseOffsetsBuffer);
-        _computeShader.SetBuffer(kernelIndex, "biasBaseOffsets", biasBaseOffsetsBuffer);
-        _computeShader.SetBuffer(kernelIndex, "outputs", outputsBuffer);
-
-        _computeShader.SetInt("totalLayers", _neuralNet.layerSizes.Length);
-        _computeShader.SetInt("numInputs", _numInputs);
         _computeShader.SetInt("numBibites", numBibites);
 
-        int threadsPerGroup = 256;
-        int totalThreads = Mathf.CeilToInt((float)numBibites / 4);
-        int threadGroupsX = Mathf.CeilToInt((float)totalThreads / threadsPerGroup);
-        _computeShader.Dispatch(kernelIndex, threadGroupsX, 1, 1);
+        int threadsPerGroup = 64;
+        int threadGroupsX = Mathf.CeilToInt(numBibites / 4f / threadsPerGroup);
+        _computeShader.Dispatch(kernel, threadGroupsX, 1, 1);
 
         int[] outputs = new int[numBibites];
         outputsBuffer.GetData(outputs);
@@ -165,6 +172,7 @@ public class BibiteManager : MonoBehaviour
         {
             BibiteData bibiteData = _bibiteDatas[i];
             Transform bibiteTransform = bibiteData.transform;
+            Vector3 bibiteTransformRight = bibiteTransform.right;
             Bibite bibiteScript = bibiteData.script;
             Rigidbody2D bibiteRb = bibiteData.rb;
             float[] bibiteInputs = bibiteData.inputs;
@@ -192,7 +200,6 @@ public class BibiteManager : MonoBehaviour
             if (bibiteScript._health <= 0 || bibiteScript._age >= bibiteScript._maxAge)
             {
                 _toRemove.Add(bibiteData);
-                numBibites--;
                 continue;
             }
 
@@ -205,9 +212,9 @@ public class BibiteManager : MonoBehaviour
             for (int j = 0; j < _numRays; j++)
             {
                 float angle = _numRays > 1 ? -_spreadAngle / 2f + j * angleStep : 0;
-                Vector2 dir = Quaternion.Euler(0, 0, angle) * bibiteTransform.right;
-                RaycastHit2D hit = Physics2D.Raycast(bibiteTransform.position + bibiteTransform.right * bibiteScript._size, dir, bibiteScript._rayLength);
-                // Debug.DrawRay(bibiteTransform.position + bibiteTransform.right * bibiteScript._size, dir * bibiteScript._rayLength, Color.red);
+                Vector2 dir = Quaternion.Euler(0, 0, angle) * bibiteTransformRight;
+                RaycastHit2D hit = Physics2D.Raycast(bibiteTransform.position + bibiteTransformRight * bibiteScript._size, dir, bibiteScript._rayLength);
+                // Debug.DrawRay(bibiteTransform.position + bibiteTransformRight * bibiteScript._size, dir * bibiteScript._rayLength, Color.red);
 
                 int inputIndex = j * 2;
                 if (hit.collider != null)
@@ -227,7 +234,7 @@ public class BibiteManager : MonoBehaviour
             int bestIdx = outputs[i];
             if (bestIdx == 0)
             {
-                Vector3 direction = bibiteTransform.right * Mathf.Max(bibiteScript._energy / 75f, 0.1f);
+                Vector3 direction = bibiteTransformRight * Mathf.Max(bibiteScript._energy / 75f, 0.1f);
                 bibiteRb.AddForce(bibiteScript._speed * direction.normalized);
             }
             else if (bestIdx == 1)
@@ -253,14 +260,36 @@ public class BibiteManager : MonoBehaviour
             bibiteRb.linearVelocity = Vector2.ClampMagnitude(bibiteRb.linearVelocity, _maxSpeed);
         }
 
-        foreach (BibiteData bibiteData in _toRemove)
-        {
-            int idx = _bibiteDatas.IndexOf(bibiteData);
-            _allWeights.RemoveRange(idx, _numWeights);
-            _allBiases.RemoveRange(idx, _numBiases);
+        if (_toRemove.Count > 0) {
+            foreach (BibiteData bibiteData in _toRemove)
+            {
+                int idx = _bibiteDatas.IndexOf(bibiteData);
+                _allWeights.RemoveRange(idx, _numWeights);
+                _allBiases.RemoveRange(idx, _numBiases);
 
-            _bibiteDatas.Remove(bibiteData);
-            Destroy(bibiteData.obj);
+                weightsBuffer.SetData(_allWeights.ToArray());
+                biasesBuffer.SetData(_allBiases.ToArray());
+                _computeShader.SetBuffer(kernel, "weights", weightsBuffer);
+                _computeShader.SetBuffer(kernel, "biases", biasesBuffer);
+
+                _bibiteDatas.Remove(bibiteData);
+                Destroy(bibiteData.obj);
+            }
+
+            for (int i = 0; i < weightBaseOffsets.Length; i++)
+            {
+                weightBaseOffsets[i] /= numBibites;
+                weightBaseOffsets[i] *= numBibites + _toRemove.Count;
+            }
+
+            for (int i = 0; i < biasBaseOffsets.Length; i++)
+            {
+                biasBaseOffsets[i] /= numBibites;
+                biasBaseOffsets[i] *= numBibites + _toRemove.Count;
+            }
+
+            numBibites -= _toRemove.Count;
+            _toRemove.Clear();
         }
 
         if (_children.Count > 0)
@@ -271,10 +300,28 @@ public class BibiteManager : MonoBehaviour
             {
                 _allWeights.AddRange(child.weights);
                 _allBiases.AddRange(child.biases);
-            }
 
-            _children.Clear();
+                weightsBuffer.SetData(_allWeights.ToArray());
+                biasesBuffer.SetData(_allBiases.ToArray());
+                _computeShader.SetBuffer(kernel, "weights", weightsBuffer);
+                _computeShader.SetBuffer(kernel, "biases", biasesBuffer);
+            }
         }
+
+        for (int i = 0; i < weightBaseOffsets.Length; i++)
+        {
+            weightBaseOffsets[i] /= numBibites;
+            weightBaseOffsets[i] *= numBibites + _children.Count;
+        }
+
+        for (int i = 0; i < biasBaseOffsets.Length; i++)
+        {
+            biasBaseOffsets[i] /= numBibites;
+            biasBaseOffsets[i] *= numBibites + _children.Count;
+        }
+
+        numBibites += _children.Count;
+        _children.Clear();
     }
 
     private void OnValidate()
@@ -335,7 +382,6 @@ public class BibiteManager : MonoBehaviour
             });
         }
         parentScript._energy -= numChildren * 20;
-        numBibites += numChildren;
     }
 
     private float MutateValue(float baseValue, float range, float minValue = float.NegativeInfinity)
