@@ -23,10 +23,4 @@ public class Bibite : MonoBehaviour
     [Space]
 
     public float _rayLength = 10f;
-
-    private void Start()
-    {
-        _maturityAge = Random.Range(_maturityMinAge, _maturityMaxAge);
-        transform.localScale = Vector3.one * _size;
-    }
 }

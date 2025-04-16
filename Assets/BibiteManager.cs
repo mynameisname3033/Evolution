@@ -1,6 +1,6 @@
 ﻿using System.Collections.Generic;
-using Unity.Mathematics;
 using UnityEngine;
+using UnityEngine.Rendering;
 using Random = UnityEngine.Random;
 
 public class BibiteManager : MonoBehaviour
@@ -19,36 +19,40 @@ public class BibiteManager : MonoBehaviour
     private List<BibiteData> _bibiteDatas;
     private List<BibiteData> _toRemove;
     private List<BibiteData> _children;
+    private List<BibiteData> _objectPool;
 
     private List<float> _allInputs;
     private List<float> _allWeights;
     private List<float> _allBiases;
+    private int[] neuralNetOutputs;
+
+    private GameObject[] walls;
+    private GameObject divider;
 
     private int _numInputs;
     private int _numWeights;
     private int _numBiases;
 
-    private int[] weightBaseOffsets;
-    private int[] biasBaseOffsets;
-
     private ComputeBuffer inputsBuffer;
     private ComputeBuffer weightsBuffer;
     private ComputeBuffer biasesBuffer;
     private ComputeBuffer layerSizesBuffer;
-    private ComputeBuffer weightBaseOffsetsBuffer;
-    private ComputeBuffer biasBaseOffsetsBuffer;
     private ComputeBuffer outputsBuffer;
 
     private int kernel;
 
     [Header("Bibite Count")]
     [SerializeField] int numBibites = 20;
+    [SerializeField] int maxBibites = 1500;
     [SerializeField] bool kill5PercentOfBibites = false;
+    [SerializeField] int objectPoolSize = 100;
+    [SerializeField] bool add100PooledBibites = false;
 
     [Header("Objects")]
     [SerializeField] GameObject _bibitePrefab;
     private NeuralNet _neuralNet;
-    [SerializeField] ComputeShader _computeShader;
+    [SerializeField] ComputeShader _neuralNetShader;
+    [SerializeField] ComputeShader _raycastingShader;
 
     [Header("Bibite Properties")]
     [SerializeField] float _maxSpeed = 50f;
@@ -60,16 +64,20 @@ public class BibiteManager : MonoBehaviour
     private void Start()
     {
         _neuralNet = GetComponent<NeuralNet>();
+        walls = GameObject.FindGameObjectsWithTag("Wall");
+        divider = GameObject.Find("Divider");
 
         _bibiteDatas = new List<BibiteData>(numBibites);
         _toRemove = new List<BibiteData>();
         _children = new List<BibiteData>();
+        _objectPool = new List<BibiteData>(objectPoolSize);
 
         _allInputs = new List<float>();
         _allWeights = new List<float>();
         _allBiases = new List<float>();
 
         _numInputs = _numRays * 2 + 3;
+        neuralNetOutputs = new int[numBibites];
 
         for (int i = 0; i < numBibites; i++)
         {
@@ -79,6 +87,8 @@ public class BibiteManager : MonoBehaviour
             Rigidbody2D bibiteRb = bibiteObj.GetComponent<Rigidbody2D>();
 
             _neuralNet.InitializeParameters(out float[] bibiteWeights, out float[] bibiteBiases);
+            _numWeights = bibiteWeights.Length;
+            _numBiases = bibiteBiases.Length;
             _allWeights.AddRange(bibiteWeights);
             _allBiases.AddRange(bibiteBiases);
 
@@ -98,41 +108,42 @@ public class BibiteManager : MonoBehaviour
             });
         }
 
-        kernel = _computeShader.FindKernel("Forward");
+        for (int i = 0; i < objectPoolSize; i++)
+        {
+            GameObject bibiteObj = Instantiate(_bibitePrefab, Vector3.zero, Quaternion.identity);
+            bibiteObj.SetActive(false);
 
-        _numWeights = _bibiteDatas[0].weights.Length;
-        _numBiases = _bibiteDatas[0].biases.Length;
+            _objectPool.Add(new BibiteData
+            {
+                obj = bibiteObj,
+                transform = bibiteObj.transform,
+                script = bibiteObj.GetComponent<Bibite>(),
+                rb = bibiteObj.GetComponent<Rigidbody2D>(),
+                inputs = new float[_numInputs]
+            });
+        }
 
-        inputsBuffer = new(_numInputs * 1500, sizeof(float));
-        weightsBuffer = new(_numWeights * 1500, sizeof(float));
-        biasesBuffer = new(_numBiases * 1500, sizeof(float));
+        kernel = _neuralNetShader.FindKernel("Forward");
+
+        inputsBuffer = new(_numInputs * maxBibites, sizeof(float));
+        weightsBuffer = new(_numWeights * maxBibites, sizeof(float));
+        biasesBuffer = new(_numBiases * maxBibites, sizeof(float));
         layerSizesBuffer = new(_neuralNet.layerSizes.Length, sizeof(int));
-        weightBaseOffsetsBuffer = new(_neuralNet.layerSizes.Length - 1, sizeof(int));
-        biasBaseOffsetsBuffer = new(_neuralNet.layerSizes.Length - 1, sizeof(int));
-        outputsBuffer = new(1500, sizeof(int));
+        outputsBuffer = new(maxBibites, sizeof(int));
 
         layerSizesBuffer.SetData(_neuralNet.layerSizes);
         weightsBuffer.SetData(_allWeights.ToArray());
         biasesBuffer.SetData(_allBiases.ToArray());
 
-        _computeShader.SetInt("totalLayers", _neuralNet.layerSizes.Length);
-        _computeShader.SetInt("numInputs", _numInputs);
+        _neuralNetShader.SetInt("totalLayers", _neuralNet.layerSizes.Length);
+        _neuralNetShader.SetInt("numInputs", _numInputs);
+        _neuralNetShader.SetInt("numWeights", _numWeights);
+        _neuralNetShader.SetInt("numBiases", _numBiases);
 
-        _computeShader.SetBuffer(kernel, "layerSizes", layerSizesBuffer);
-        _computeShader.SetBuffer(kernel, "outputs", outputsBuffer);
-        _computeShader.SetBuffer(kernel, "weights", weightsBuffer);
-        _computeShader.SetBuffer(kernel, "biases", biasesBuffer);
-
-        weightBaseOffsets = new int[_neuralNet.layerSizes.Length - 1];
-        biasBaseOffsets = new int[_neuralNet.layerSizes.Length - 1];
-
-        for (int l = 1; l < _neuralNet.layerSizes.Length; l++)
-        {
-            int prevLayerSize = _neuralNet.layerSizes[l - 1];
-            int nextLayerSize = _neuralNet.layerSizes[l];
-            weightBaseOffsets[l - 1] = (l - 1) * numBibites * prevLayerSize * nextLayerSize;
-            biasBaseOffsets[l - 1] = (l - 1) * numBibites * nextLayerSize;
-        }
+        _neuralNetShader.SetBuffer(kernel, "layerSizes", layerSizesBuffer);
+        _neuralNetShader.SetBuffer(kernel, "outputs", outputsBuffer);
+        _neuralNetShader.SetBuffer(kernel, "weights", weightsBuffer);
+        _neuralNetShader.SetBuffer(kernel, "biases", biasesBuffer);
     }
 
     private void OnDisable()
@@ -141,32 +152,71 @@ public class BibiteManager : MonoBehaviour
         weightsBuffer.Release();
         biasesBuffer.Release();
         layerSizesBuffer.Release();
-        weightBaseOffsetsBuffer.Release();
-        biasBaseOffsetsBuffer.Release();
         outputsBuffer.Release();
     }
 
-    private void Update()
+    private void FixedUpdate()
     {
-        float dt = Time.deltaTime;
+        if (_toRemove.Count > 0)
+        {
+            foreach (BibiteData bibiteData in _toRemove)
+            {
+                int idx = _bibiteDatas.IndexOf(bibiteData);
+                if (idx != -1)
+                {
+                    _allWeights.RemoveRange(idx * _numWeights, _numWeights);
+                    _allBiases.RemoveRange(idx * _numBiases, _numBiases);
+                }
+
+                bibiteData.obj.SetActive(false);
+                _objectPool.Add(bibiteData);
+                _bibiteDatas.Remove(bibiteData);
+            }
+
+            weightsBuffer.SetData(_allWeights);
+            biasesBuffer.SetData(_allBiases);
+
+            _neuralNetShader.SetBuffer(kernel, "weights", weightsBuffer);
+            _neuralNetShader.SetBuffer(kernel, "biases", biasesBuffer);
+
+            _toRemove.Clear();
+        }
+
+        if (_children.Count > 0)
+        {
+            _bibiteDatas.AddRange(_children);
+
+            foreach (BibiteData child in _children)
+            {
+                _allWeights.AddRange(child.weights);
+                _allBiases.AddRange(child.biases);
+            }
+
+            weightsBuffer.SetData(_allWeights);
+            biasesBuffer.SetData(_allBiases);
+
+            _neuralNetShader.SetBuffer(kernel, "weights", weightsBuffer);
+            _neuralNetShader.SetBuffer(kernel, "biases", biasesBuffer);
+
+            _children.Clear();
+        }
+
+        numBibites = _bibiteDatas.Count;
+        objectPoolSize = _objectPool.Count;
+
+        inputsBuffer.SetData(_allInputs);
+        _neuralNetShader.SetBuffer(kernel, "inputs", inputsBuffer);
+
+        _neuralNetShader.SetInt("numBibites", numBibites);
+
+        int threadsPerGroup = 32;
+        int batchSize = 4;
+        int threadGroupsX = Mathf.CeilToInt(numBibites / (float)batchSize / threadsPerGroup);
+        _neuralNetShader.Dispatch(kernel, threadGroupsX, 1, 1);
+
+        AsyncGPUReadback.Request(outputsBuffer, OnCompleteReadback);
+
         _allInputs.Clear();
-
-        inputsBuffer.SetData(_allInputs.ToArray());
-        weightBaseOffsetsBuffer.SetData(weightBaseOffsets);
-        biasBaseOffsetsBuffer.SetData(biasBaseOffsets);
-
-        _computeShader.SetBuffer(kernel, "inputs", inputsBuffer);
-        _computeShader.SetBuffer(kernel, "weightBaseOffsets", weightBaseOffsetsBuffer);
-        _computeShader.SetBuffer(kernel, "biasBaseOffsets", biasBaseOffsetsBuffer);
-
-        _computeShader.SetInt("numBibites", numBibites);
-
-        int threadsPerGroup = 64;
-        int threadGroupsX = Mathf.CeilToInt(numBibites / 4f / threadsPerGroup);
-        _computeShader.Dispatch(kernel, threadGroupsX, 1, 1);
-
-        int[] outputs = new int[numBibites];
-        outputsBuffer.GetData(outputs);
 
         for (int i = 0; i < numBibites; i++)
         {
@@ -176,32 +226,6 @@ public class BibiteManager : MonoBehaviour
             Bibite bibiteScript = bibiteData.script;
             Rigidbody2D bibiteRb = bibiteData.rb;
             float[] bibiteInputs = bibiteData.inputs;
-
-            bibiteScript._age += dt / 20f;
-            if (bibiteScript._age >= bibiteScript._maturityAge && !bibiteScript._matured)
-            {
-                bibiteScript._matured = true;
-                bibiteScript._size += Random.Range(0.1f, 0.35f);
-                bibiteRb.mass = bibiteScript._size;
-                bibiteTransform.localScale = Vector3.one * bibiteScript._size;
-                AddBibites(bibiteData, Random.Range(_minChildren, _maxChildren + 1));
-            }
-
-            float movementCost = bibiteRb.linearVelocity.magnitude + Mathf.Abs(bibiteRb.angularVelocity) / 30f;
-            float sizeCost = Mathf.Pow(bibiteScript._size, 1.5f);
-            float energyDrain = dt * sizeCost * movementCost * 0.2f;
-            bibiteScript._energy = Mathf.Max(bibiteScript._energy - energyDrain, 0);
-
-            if (bibiteScript._energy <= 0)
-                bibiteScript._health -= dt * 7f * Mathf.Exp(-bibiteScript._health / 200);
-            if (bibiteTransform.position.y <= 40)
-                bibiteScript._health -= dt * 4f;
-
-            if (bibiteScript._health <= 0 || bibiteScript._age >= bibiteScript._maxAge)
-            {
-                _toRemove.Add(bibiteData);
-                continue;
-            }
 
             int baseIndex = _numRays * 2;
             bibiteInputs[baseIndex] = bibiteTransform.position.x / 55f;
@@ -220,21 +244,21 @@ public class BibiteManager : MonoBehaviour
                 if (hit.collider != null)
                 {
                     bibiteInputs[inputIndex] = hit.distance / bibiteScript._rayLength;
-                    bibiteInputs[inputIndex + 1] = hit.collider.CompareTag("Bibite") ? 1f : 0.5f;
+                    bibiteInputs[inputIndex + 1] = hit.collider.CompareTag("Bibite") ? 1f : -1f;
                 }
                 else
                 {
-                    bibiteInputs[inputIndex] = 1f;
+                    bibiteInputs[inputIndex] = -1f;
                     bibiteInputs[inputIndex + 1] = 0f;
                 }
             }
 
             _allInputs.AddRange(bibiteInputs);
 
-            int bestIdx = outputs[i];
+            int bestIdx = neuralNetOutputs[i];
             if (bestIdx == 0)
             {
-                Vector3 direction = bibiteTransformRight * Mathf.Max(bibiteScript._energy / 75f, 0.1f);
+                Vector3 direction = bibiteTransform.right * Mathf.Max(bibiteScript._energy / 75f, 0.1f);
                 bibiteRb.AddForce(bibiteScript._speed * direction.normalized);
             }
             else if (bestIdx == 1)
@@ -255,97 +279,113 @@ public class BibiteManager : MonoBehaviour
 
             bibiteRb.angularVelocity = Mathf.Clamp(bibiteRb.angularVelocity / 4f, -_maxSpeed, _maxSpeed);
             bibiteRb.linearVelocity = Vector2.ClampMagnitude(bibiteRb.linearVelocity, _maxSpeed);
-
-            bibiteRb.angularVelocity = Mathf.Clamp(bibiteRb.angularVelocity / 4f, -_maxSpeed, _maxSpeed);
-            bibiteRb.linearVelocity = Vector2.ClampMagnitude(bibiteRb.linearVelocity, _maxSpeed);
         }
+    }
 
-        if (_toRemove.Count > 0) {
-            foreach (BibiteData bibiteData in _toRemove)
-            {
-                int idx = _bibiteDatas.IndexOf(bibiteData);
-                _allWeights.RemoveRange(idx, _numWeights);
-                _allBiases.RemoveRange(idx, _numBiases);
-
-                weightsBuffer.SetData(_allWeights.ToArray());
-                biasesBuffer.SetData(_allBiases.ToArray());
-                _computeShader.SetBuffer(kernel, "weights", weightsBuffer);
-                _computeShader.SetBuffer(kernel, "biases", biasesBuffer);
-
-                _bibiteDatas.Remove(bibiteData);
-                Destroy(bibiteData.obj);
-            }
-
-            for (int i = 0; i < weightBaseOffsets.Length; i++)
-            {
-                weightBaseOffsets[i] /= numBibites;
-                weightBaseOffsets[i] *= numBibites + _toRemove.Count;
-            }
-
-            for (int i = 0; i < biasBaseOffsets.Length; i++)
-            {
-                biasBaseOffsets[i] /= numBibites;
-                biasBaseOffsets[i] *= numBibites + _toRemove.Count;
-            }
-
-            numBibites -= _toRemove.Count;
-            _toRemove.Clear();
-        }
-
-        if (_children.Count > 0)
+    private void OnCompleteReadback(AsyncGPUReadbackRequest request)
+    {
+        if (request.hasError)
         {
-            _bibiteDatas.AddRange(_children);
+            Debug.LogError("GPU readback error");
+            return;
+        }
 
-            foreach (BibiteData child in _children)
+        neuralNetOutputs = request.GetData<int>().ToArray();
+    }
+
+    private void Update()
+    {
+        float dt = Time.deltaTime;
+
+        for (int i = 0; i < numBibites; i++)
+        {
+            BibiteData bibiteData = _bibiteDatas[i];
+            Transform bibiteTransform = bibiteData.transform;
+            Bibite bibiteScript = bibiteData.script;
+            Rigidbody2D bibiteRb = bibiteData.rb;
+
+            if ((bibiteScript._health <= 0 || bibiteScript._age >= bibiteScript._maxAge) && !_toRemove.Contains(bibiteData))
             {
-                _allWeights.AddRange(child.weights);
-                _allBiases.AddRange(child.biases);
-
-                weightsBuffer.SetData(_allWeights.ToArray());
-                biasesBuffer.SetData(_allBiases.ToArray());
-                _computeShader.SetBuffer(kernel, "weights", weightsBuffer);
-                _computeShader.SetBuffer(kernel, "biases", biasesBuffer);
+                _toRemove.Add(bibiteData);
+                continue;
             }
-        }
 
-        for (int i = 0; i < weightBaseOffsets.Length; i++)
-        {
-            weightBaseOffsets[i] /= numBibites;
-            weightBaseOffsets[i] *= numBibites + _children.Count;
-        }
+            bibiteScript._age += dt / 20f;
+            if (!bibiteScript._matured && bibiteScript._age >= bibiteScript._maturityAge)
+            {
+                bibiteScript._matured = true;
+                bibiteScript._size += Random.Range(0.1f, 0.35f);
+                bibiteRb.mass = bibiteScript._size;
+                bibiteTransform.localScale = Vector3.one * bibiteScript._size;
+                AddBibites(bibiteData, Random.Range(_minChildren, _maxChildren + 1));
+            }
 
-        for (int i = 0; i < biasBaseOffsets.Length; i++)
-        {
-            biasBaseOffsets[i] /= numBibites;
-            biasBaseOffsets[i] *= numBibites + _children.Count;
-        }
+            float movementCost = bibiteRb.linearVelocity.magnitude + Mathf.Abs(bibiteRb.angularVelocity) / 30f;
+            float sizeCost = Mathf.Pow(bibiteScript._size, 1.5f);
+            float energyDrain = dt * sizeCost * movementCost * 0.2f;
+            bibiteScript._energy = Mathf.Max(bibiteScript._energy - energyDrain, 0);
 
-        numBibites += _children.Count;
-        _children.Clear();
+            if (bibiteScript._energy <= 0)
+                bibiteScript._health -= dt * 7f * Mathf.Exp(-bibiteScript._health / 200);
+            if (bibiteTransform.position.y < divider.transform.position.y)
+                bibiteScript._health -= dt * 4f;
+        }
     }
 
     private void OnValidate()
     {
         if (Application.isPlaying)
         {
-            if (Time.time > 0.01f)
-                numBibites = _bibiteDatas.Count;
-
             if (kill5PercentOfBibites && numBibites >= 20)
             {
                 int numToKill = Mathf.CeilToInt(numBibites / 20f);
                 for (int i = 0; i < numToKill; i++)
                 {
-                    Destroy(_bibiteDatas[0].obj);
+                    BibiteData bibiteData = _bibiteDatas[0];
+                    bibiteData.obj.SetActive(false);
+                    _objectPool.Add(bibiteData);
                     _bibiteDatas.RemoveAt(0);
+
                     _allWeights.RemoveRange(0, _numWeights);
                     _allBiases.RemoveRange(0, _numBiases);
+
                     numBibites--;
                 }
+                kill5PercentOfBibites = false;
+            }
+
+            else if (add100PooledBibites)
+            {
+                for (int i = 0; i < 100; i++)
+                {
+                    GameObject bibiteObj = Instantiate(_bibitePrefab, Vector3.zero, Quaternion.identity);
+                    bibiteObj.SetActive(false);
+
+                    _objectPool.Add(new BibiteData
+                    {
+                        obj = bibiteObj,
+                        transform = bibiteObj.transform,
+                        script = bibiteObj.GetComponent<Bibite>(),
+                        rb = bibiteObj.GetComponent<Rigidbody2D>(),
+                        inputs = new float[_numInputs]
+                    });
+                }
+                add100PooledBibites = false;
+            }
+
+            else if (Time.time > 0.01f)
+            {
+                inputsBuffer = new(_numInputs * maxBibites, sizeof(float));
+                weightsBuffer = new(_numWeights * maxBibites, sizeof(float));
+                biasesBuffer = new(_numBiases * maxBibites, sizeof(float));
+                outputsBuffer = new(maxBibites, sizeof(int));
+
+                _neuralNetShader.SetBuffer(kernel, "inputs", inputsBuffer);
+                _neuralNetShader.SetBuffer(kernel, "outputs", outputsBuffer);
+                _neuralNetShader.SetBuffer(kernel, "weights", weightsBuffer);
+                _neuralNetShader.SetBuffer(kernel, "biases", biasesBuffer);
             }
         }
-
-        kill5PercentOfBibites = false;
     }
 
     private void AddBibites(BibiteData parentBibiteData, int numChildren)
@@ -353,39 +393,72 @@ public class BibiteManager : MonoBehaviour
         Bibite parentScript = parentBibiteData.script;
         for (int i = 0; i < numChildren; i++)
         {
-            Vector3 spawnPos = new(Random.Range(-85f, 85f), Random.Range(-48f, 48f), 0f);
-            GameObject bibiteObj = Instantiate(_bibitePrefab, spawnPos, Quaternion.Euler(0, 0, Random.Range(0f, 360f)));
-            Bibite bibiteScript = bibiteObj.GetComponent<Bibite>();
-            Rigidbody2D bibiteRb = bibiteObj.GetComponent<Rigidbody2D>();
-
-            bibiteScript._generation = parentScript._generation + 1;
-            bibiteScript._size = MutateValue(parentScript._size - Random.Range(0.1f, 0.35f), 0.05f, 0.05f);
-            bibiteScript._speed = MutateValue(parentScript._speed, 0.3f, 0.1f);
-            bibiteScript._rayLength = MutateValue(parentScript._rayLength, 0.2f, 0f);
-            bibiteScript._maturityMinAge = MutateValue(parentScript._maturityMinAge, 0.2f, 1f);
-            bibiteScript._maturityMaxAge = MutateValue(parentScript._maturityMaxAge, 0.2f, bibiteScript._maturityMinAge + 0.1f);
-            bibiteScript._maturityAge = Random.Range(bibiteScript._maturityMinAge, bibiteScript._maturityMaxAge);
-            bibiteObj.transform.localScale = Vector3.one * bibiteScript._size;
-
-            _neuralNet.ModifyParameters(parentBibiteData.weights, parentBibiteData.biases, out float[] newWeights, out float[] newBiases);
-            bibiteRb.mass = bibiteScript._size;
-
-            _children.Add(new BibiteData
+            if (_objectPool.Count > 0)
             {
-                obj = bibiteObj,
-                transform = bibiteObj.transform,
-                script = bibiteScript,
-                rb = bibiteRb,
-                inputs = new float[_numInputs],
-                weights = newWeights,
-                biases = newBiases
-            });
+                BibiteData poolBibiteData = _objectPool[0];
+                GameObject poolBibiteObj = poolBibiteData.obj;
+                Bibite poolBibiteScript = poolBibiteObj.GetComponent<Bibite>();
+                Rigidbody2D poolBibiteRb = poolBibiteObj.GetComponent<Rigidbody2D>();
+
+                poolBibiteScript._health = 100;
+                poolBibiteScript._energy = 100;
+                poolBibiteScript._age = 0;
+                poolBibiteScript._matured = false;
+
+                poolBibiteObj.transform.SetPositionAndRotation(new(Random.Range(-85f, 85f), Random.Range(-48f, 48f), 0f), Quaternion.Euler(0, 0, Random.Range(0f, 360f)));
+
+                MutateValues(parentScript, poolBibiteScript);
+                poolBibiteObj.transform.localScale = Vector3.one * poolBibiteScript._size;
+                poolBibiteRb.mass = poolBibiteScript._size;
+
+                _neuralNet.ModifyParameters(parentBibiteData.weights, parentBibiteData.biases, out float[] newPoolWeights, out float[] newPoolBiases);
+                poolBibiteData.weights = newPoolWeights;
+                poolBibiteData.biases = newPoolBiases;
+
+                poolBibiteObj.SetActive(true);
+                _children.Add(poolBibiteData);
+                _objectPool.RemoveAt(0);
+            }
+
+            else
+            {
+                Vector3 spawnPos = new(Random.Range(-85f, 85f), Random.Range(-48f, 48f), 0f);
+                GameObject bibiteObj = Instantiate(_bibitePrefab, spawnPos, Quaternion.Euler(0, 0, Random.Range(0f, 360f)));
+                Bibite bibiteScript = bibiteObj.GetComponent<Bibite>();
+                Rigidbody2D bibiteRb = bibiteObj.GetComponent<Rigidbody2D>();
+
+                MutateValues(parentScript, bibiteScript);
+                bibiteObj.transform.localScale = Vector3.one * bibiteScript._size;
+                bibiteRb.mass = bibiteScript._size;
+
+                _neuralNet.ModifyParameters(parentBibiteData.weights, parentBibiteData.biases, out float[] newWeights, out float[] newBiases);
+
+                _children.Add(new BibiteData
+                {
+                    obj = bibiteObj,
+                    transform = bibiteObj.transform,
+                    script = bibiteScript,
+                    rb = bibiteRb,
+                    inputs = new float[_numInputs],
+                    weights = newWeights,
+                    biases = newBiases
+                });
+
+                Debug.Log("Pool empty");
+            }
         }
+
         parentScript._energy -= numChildren * 20;
     }
 
-    private float MutateValue(float baseValue, float range, float minValue = float.NegativeInfinity)
+    private void MutateValues(Bibite parentScript, Bibite bibiteScript)
     {
-        return Random.Range(0, 2) == 1 ? Mathf.Max(baseValue + Random.Range(-range, range), minValue) : baseValue;
+        bibiteScript._generation = parentScript._generation + 1;
+        bibiteScript._size = Random.Range(0, 2) == 1 ? Mathf.Max(parentScript._size - Random.Range(0.1f, 0.35f) + Random.Range(-0.05f, 0.05f), 0.05f) : parentScript._size - Random.Range(0.1f, 0.35f);
+        bibiteScript._speed = Random.Range(0, 2) == 1 ? Mathf.Max(parentScript._speed + Random.Range(0.3f, -0.3f), 0.1f) : parentScript._speed;
+        bibiteScript._rayLength = Random.Range(0, 2) == 1 ? Mathf.Max(parentScript._rayLength + Random.Range(-0.2f, 0.2f), 0f) : parentScript._rayLength;
+        bibiteScript._maturityMinAge = Random.Range(0, 2) == 1 ? Mathf.Max(parentScript._maturityMinAge + Random.Range(-0.2f, 0.2f), 1f) : parentScript._maturityMinAge;
+        bibiteScript._maturityMaxAge = Random.Range(0, 2) == 1 ? Mathf.Max(parentScript._maturityMaxAge + Random.Range(-0.2f, 0.2f), bibiteScript._maturityMinAge + 0.1f) : parentScript._maturityMaxAge;
+        bibiteScript._maturityAge = Random.Range(bibiteScript._maturityMinAge, bibiteScript._maturityMaxAge);
     }
 }

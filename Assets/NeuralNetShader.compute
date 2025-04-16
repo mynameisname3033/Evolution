@@ -1,0 +1,98 @@
+#pragma kernel Forward
+
+StructuredBuffer<float> inputs;
+StructuredBuffer<float> weights;
+StructuredBuffer<float> biases;
+StructuredBuffer<int> layerSizes;
+RWStructuredBuffer<int> outputs;
+
+int totalLayers;
+int numInputs;
+int numWeights;
+int numBiases;
+int numBibites;
+
+float Sigmoid(float x)
+{
+    return x / (1.0 + abs(x));
+}
+
+float ReLU(float x)
+{
+    return max(0.0, x);
+}
+
+#define BATCH_SIZE 4
+#define MAX_LAYER_SIZE 16
+
+[numthreads(32, 1, 1)]
+void Forward(uint3 id : SV_DispatchThreadID)
+{
+    uint startBibite = id.x * BATCH_SIZE;
+
+    for (uint b = 0; b < BATCH_SIZE; b++)
+    {
+        int bibiteID = startBibite + b;
+        if (bibiteID >= numBibites)
+            return;
+
+        int inputOffset = bibiteID * numInputs;
+        int weightOffset = bibiteID * numWeights;
+        int biasOffset = bibiteID * numBiases;
+
+        int currentLayerSize = layerSizes[0];
+        int nextLayerSize;
+        
+        float tempA[MAX_LAYER_SIZE];
+        float tempB[MAX_LAYER_SIZE];
+
+        for (int i = 0; i < currentLayerSize; i++)
+        {
+            tempA[i] = inputs[inputOffset + i];
+        }
+
+        for (int l = 1; l < totalLayers; l++)
+        {
+            nextLayerSize = layerSizes[l];
+            int prevLayerSize = layerSizes[l - 1];
+
+            [unroll]
+            for (int j = 0; j < nextLayerSize; j++)
+            {
+                int localWeightOffset = ((l - 1) * (prevLayerSize * nextLayerSize)) + (j * prevLayerSize);
+                int finalWeightIndex = weightOffset + localWeightOffset;
+
+                int localBiasOffset = ((l - 1) * nextLayerSize) + j;
+                int finalBiasIndex = biasOffset + localBiasOffset;
+
+                float sum = biases[finalBiasIndex];
+                [unroll]
+                for (int i = 0; i < prevLayerSize; i++)
+                {
+                    sum += tempA[i] * weights[finalWeightIndex + i];
+                }
+
+                tempB[j] = (l < totalLayers - 1 ? ReLU(sum) : sum);
+            }
+
+            for (int i = 0; i < nextLayerSize; i++)
+                tempA[i] = tempB[i];
+
+            currentLayerSize = nextLayerSize;
+        }
+
+        int bestOutput = 0;
+        float maxVal = tempA[0];
+
+        for (int j = 1; j < currentLayerSize; j++)
+        {
+            if (tempA[j] > maxVal)
+            {
+                maxVal = tempA[j];
+                bestOutput = j;
+            }
+        }
+
+        outputs[bibiteID] = bestOutput;
+    }
+}

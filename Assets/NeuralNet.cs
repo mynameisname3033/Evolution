@@ -1,6 +1,3 @@
-using System;
-using System.Linq;
-using System.Runtime.CompilerServices;
 using UnityEngine;
 
 public class NeuralNet : MonoBehaviour
@@ -10,9 +7,6 @@ public class NeuralNet : MonoBehaviour
     [SerializeField] int _numHiddenNeurons = 4;
     [SerializeField] int _numOutputs = 4;
     [HideInInspector] public int[] layerSizes;
-
-    private float[] bufferA;
-    private float[] bufferB;
 
     public void InitializeParameters(out float[] weights, out float[] biases)
     {
@@ -39,46 +33,6 @@ public class NeuralNet : MonoBehaviour
         for (int i = 0; i < biases.Length; i++) biases[i] = UnityEngine.Random.Range(-1f, 1f);
     }
 
-    public float[] Forward(float[] inputs, float[] weights, float[] biases)
-    {
-        int maxLayerSize = layerSizes.Max();
-        if (bufferA == null || bufferA.Length < maxLayerSize)
-        {
-            bufferA = new float[maxLayerSize];
-            bufferB = new float[maxLayerSize];
-        }
-
-        int weightIndex = 0;
-        int biasIndex = 0;
-
-        float[] current = bufferA;
-        float[] next = bufferB;
-
-        Array.Copy(inputs, current, inputs.Length);
-
-        for (int layer = 0; layer < layerSizes.Length - 1; layer++)
-        {
-            int inputSize = layerSizes[layer];
-            int outputSize = layerSizes[layer + 1];
-
-            for (int o = 0; o < outputSize; o++)
-            {
-                float sum = biases[biasIndex++];
-                for (int i = 0; i < inputSize; i++)
-                {
-                    sum += weights[weightIndex++] * current[i];
-                }
-                next[o] = ReLU(sum); // or use LeakyReLU
-            }
-
-            // Swap buffers
-            (next, current) = (current, next);
-        }
-
-        // Final output is in current
-        return current;
-    }
-
     public void ModifyParameters(float[] oldWeights, float[] oldBiases, out float[] newWeights, out float[] newBiases)
     {
         newWeights = (float[])oldWeights.Clone();
@@ -99,29 +53,4 @@ public class NeuralNet : MonoBehaviour
             newBiases[index] += Mathf.Clamp(UnityEngine.Random.Range(-0.005f, 0.005f), -1f, 1f);
         }
     }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private float ReLU(float x) => x > 0f ? x : 0f;
-
-    private float LeakyReLU(float x) => x > 0 ? x : 0.01f * x;
-
-    private float[] Softmax(float[] inputs)
-    {
-        float max = inputs.Max();
-        float sum = 0f;
-        for (int i = 0; i < inputs.Length; i++)
-        {
-            inputs[i] = Mathf.Exp(inputs[i] - max);
-            sum += inputs[i];
-        }
-        for (int i = 0; i < inputs.Length; i++)
-        {
-            inputs[i] /= sum;
-        }
-        return inputs;
-    }
-
-    private float Sigmoid(float x) => 1f / (1f + Mathf.Exp(-x));
-
-    private float Tanh(float x) => (float)Math.Tanh(x);
 }
