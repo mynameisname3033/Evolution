@@ -1,4 +1,5 @@
 ﻿using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using UnityEngine;
 using UnityEngine.Rendering;
 using Random = UnityEngine.Random;
@@ -26,8 +27,8 @@ public class BibiteManager : MonoBehaviour
     private List<float> _allBiases;
     private int[] neuralNetOutputs;
 
-    private GameObject[] walls;
     private GameObject divider;
+    private GameObject[] walls;
 
     private int _numInputs;
     private int _numWeights;
@@ -64,8 +65,8 @@ public class BibiteManager : MonoBehaviour
     private void Start()
     {
         _neuralNet = GetComponent<NeuralNet>();
-        walls = GameObject.FindGameObjectsWithTag("Wall");
         divider = GameObject.Find("Divider");
+        walls = GameObject.FindGameObjectsWithTag("Wall");
 
         _bibiteDatas = new List<BibiteData>(numBibites);
         _toRemove = new List<BibiteData>();
@@ -81,7 +82,7 @@ public class BibiteManager : MonoBehaviour
 
         for (int i = 0; i < numBibites; i++)
         {
-            Vector3 spawnPosition = new(Random.Range(-85, 85), Random.Range(-48, 48), 0);
+            Vector3 spawnPosition = new(Random.Range(walls[3].transform.position.x * 1.05f, walls[2].transform.position.x * 1.05f), Random.Range(walls[1].transform.position.y * 1.05f, walls[0].transform.position.y * 1.05f), 0);
             GameObject bibiteObj = Instantiate(_bibitePrefab, spawnPosition, Quaternion.Euler(0, 0, Random.Range(0f, 360f)));
             Bibite bibiteScript = bibiteObj.GetComponent<Bibite>();
             Rigidbody2D bibiteRb = bibiteObj.GetComponent<Rigidbody2D>();
@@ -209,9 +210,9 @@ public class BibiteManager : MonoBehaviour
 
         _neuralNetShader.SetInt("numBibites", numBibites);
 
-        int threadsPerGroup = 32;
-        int batchSize = 4;
-        int threadGroupsX = Mathf.CeilToInt(numBibites / (float)batchSize / threadsPerGroup);
+        int threadsPerGroup = 64;
+        int batchSize = 2;
+        int threadGroupsX = Mathf.CeilToInt((numBibites / (float)batchSize) / threadsPerGroup);
         _neuralNetShader.Dispatch(kernel, threadGroupsX, 1, 1);
 
         AsyncGPUReadback.Request(outputsBuffer, OnCompleteReadback);
@@ -380,6 +381,9 @@ public class BibiteManager : MonoBehaviour
                 biasesBuffer = new(_numBiases * maxBibites, sizeof(float));
                 outputsBuffer = new(maxBibites, sizeof(int));
 
+                weightsBuffer.SetData(_allWeights.ToArray());
+                biasesBuffer.SetData(_allBiases.ToArray());
+
                 _neuralNetShader.SetBuffer(kernel, "inputs", inputsBuffer);
                 _neuralNetShader.SetBuffer(kernel, "outputs", outputsBuffer);
                 _neuralNetShader.SetBuffer(kernel, "weights", weightsBuffer);
@@ -405,7 +409,9 @@ public class BibiteManager : MonoBehaviour
                 poolBibiteScript._age = 0;
                 poolBibiteScript._matured = false;
 
-                poolBibiteObj.transform.SetPositionAndRotation(new(Random.Range(-85f, 85f), Random.Range(-48f, 48f), 0f), Quaternion.Euler(0, 0, Random.Range(0f, 360f)));
+                poolBibiteObj.transform.SetPositionAndRotation(
+                    new(Random.Range(walls[3].transform.position.x * 1.05f, walls[2].transform.position.x * 1.05f), Random.Range(walls[1].transform.position.y * 1.05f, walls[0].transform.position.y * 1.05f), 0),
+                    Quaternion.Euler(0, 0, Random.Range(0f, 360f)));
 
                 MutateValues(parentScript, poolBibiteScript);
                 poolBibiteObj.transform.localScale = Vector3.one * poolBibiteScript._size;
@@ -422,8 +428,8 @@ public class BibiteManager : MonoBehaviour
 
             else
             {
-                Vector3 spawnPos = new(Random.Range(-85f, 85f), Random.Range(-48f, 48f), 0f);
-                GameObject bibiteObj = Instantiate(_bibitePrefab, spawnPos, Quaternion.Euler(0, 0, Random.Range(0f, 360f)));
+                Vector3 spawnPosition = new(Random.Range(walls[3].transform.position.x * 1.05f, walls[2].transform.position.x * 1.05f), Random.Range(walls[1].transform.position.y * 1.05f, walls[0].transform.position.y * 1.05f), 0);
+                GameObject bibiteObj = Instantiate(_bibitePrefab, spawnPosition, Quaternion.Euler(0, 0, Random.Range(0f, 360f)));
                 Bibite bibiteScript = bibiteObj.GetComponent<Bibite>();
                 Rigidbody2D bibiteRb = bibiteObj.GetComponent<Rigidbody2D>();
 

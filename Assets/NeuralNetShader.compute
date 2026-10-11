@@ -22,13 +22,14 @@ float ReLU(float x)
     return max(0.0, x);
 }
 
-#define BATCH_SIZE 4
-#define MAX_LAYER_SIZE 16
+#define BATCH_SIZE 2
+#define MAX_LAYER_SIZE 10
 
-[numthreads(32, 1, 1)]
+[numthreads(64, 1, 1)]
 void Forward(uint3 id : SV_DispatchThreadID)
 {
     uint startBibite = id.x * BATCH_SIZE;
+    float temp[MAX_LAYER_SIZE];
 
     for (uint b = 0; b < BATCH_SIZE; b++)
     {
@@ -43,13 +44,9 @@ void Forward(uint3 id : SV_DispatchThreadID)
         int currentLayerSize = layerSizes[0];
         int nextLayerSize;
         
-        float tempA[MAX_LAYER_SIZE];
-        float tempB[MAX_LAYER_SIZE];
-
+        [unroll]
         for (int i = 0; i < currentLayerSize; i++)
-        {
-            tempA[i] = inputs[inputOffset + i];
-        }
+            temp[i] = inputs[inputOffset + i];
 
         for (int l = 1; l < totalLayers; l++)
         {
@@ -66,29 +63,28 @@ void Forward(uint3 id : SV_DispatchThreadID)
                 int finalBiasIndex = biasOffset + localBiasOffset;
 
                 float sum = biases[finalBiasIndex];
+
                 [unroll]
                 for (int i = 0; i < prevLayerSize; i++)
                 {
-                    sum += tempA[i] * weights[finalWeightIndex + i];
+                    sum += temp[i] * weights[finalWeightIndex + i];
                 }
 
-                tempB[j] = (l < totalLayers - 1 ? ReLU(sum) : sum);
+                temp[j] = (l < totalLayers - 1 ? ReLU(sum) : sum);
             }
-
-            for (int i = 0; i < nextLayerSize; i++)
-                tempA[i] = tempB[i];
 
             currentLayerSize = nextLayerSize;
         }
 
         int bestOutput = 0;
-        float maxVal = tempA[0];
+        float maxVal = temp[0];
 
+        [unroll]
         for (int j = 1; j < currentLayerSize; j++)
         {
-            if (tempA[j] > maxVal)
+            if (temp[j] > maxVal)
             {
-                maxVal = tempA[j];
+                maxVal = temp[j];
                 bestOutput = j;
             }
         }
